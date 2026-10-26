@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opening the Consultancy platform…</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh;display:flex;
+       align-items:center;justify-content:center;background:#F5F2EE;color:#1B2A4A}
+  .box{max-width:540px;padding:34px 38px;background:#fff;border:1px solid #E3DDD4;
+       border-radius:12px;box-shadow:0 10px 30px rgba(27,42,74,.08);text-align:center}
+  h1{font-size:19px;margin-bottom:10px}
+  p{font-size:14px;line-height:1.65;color:#5A5348;margin-bottom:14px}
+  .spin{width:34px;height:34px;border:3px solid #E3DDD4;border-top-color:#C2703D;
+        border-radius:50%;margin:6px auto 18px;animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  a.btn{display:inline-block;margin-top:6px;padding:10px 20px;background:#C2703D;color:#fff;
+        border-radius:7px;text-decoration:none;font-weight:600;font-size:13.5px}
+  a.ghost{background:#fff;color:#1B2A4A;border:1.5px solid #D8D2C8;margin-left:8px}
+  .err{color:#8C2F24;font-weight:600}
+  code{font-family:Consolas,monospace;font-size:12.5px;background:#F5F2EE;padding:2px 6px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="spin" id="spin"></div>
+  <h1 id="title">Opening the Consultancy platform</h1>
+  <p id="msg">Signing you in with your CTMS account. One moment…</p>
+  <div id="actions"></div>
+</div>
+
+<script>
+/*
+ * The Consultancy tab.
+ *
+ * This page exists so nobody has to sign in twice. It takes the CTMS token
+ * already held by this browser and asks the CTMS API for a single-use sign-in
+ * link, then hands over to the Consultancy application.
+ *
+ * The session token itself is never put in a URL: only the short-lived ticket
+ * is, so a link left in history or copied out cannot be replayed.
+ */
+(function () {
+  /*
+   * Where the CTMS API lives depends on how the app is being served.
+   *
+   *   npm run dev  ->  the Vite dev server serves this page at /consultancy.html
+   *                    and proxies /ctms_api to the real API (see vite.config.js),
+   *                    so the same relative path the rest of the app uses works.
+   *
+   *   Apache/dist  ->  there is no proxy, so the API is addressed directly.
+   *
+   * Getting this wrong produces a confusing "Failed to fetch" with no clue why,
+   * so it is worked out explicitly rather than assumed.
+   */
+  var devPort = window.location.port === '5173' || window.location.port === '5174';
+  var projectPath = devPort
+    ? (localStorage.getItem('ctms_project_path') || '/ctms').replace(/\/+$/, '')
+    : new URL('../../', window.location.href).pathname.replace(/\/+$/, '');
+  var API = (function () {
+    var api = devPort
+      ? '/ctms_api/sso_ticket.php'
+      : projectPath + '/ctms_server/api/sso_ticket.php';
+    // one log line makes a future problem obvious instead of mysterious
+    if (window.console && console.log) console.log('[Consultancy] API:', api);
+    return api;
+  })();
+  if (window.console && console.log) {
+    console.log('[Consultancy] origin:', window.location.origin, 'port:', window.location.port || '(none)');
+  }
+
+  /*
+   * A stuck page is worse than a clear error, so every outcome below ends in a
+   * visible message. Nothing here silently redirects or gives up.
+   */
+  function fail(title, html) {
+    var spin = document.getElementById('spin');
+    if (spin) spin.style.display = 'none';
+    document.getElementById('title').textContent = title;
+    document.getElementById('title').className = 'err';
+    document.getElementById('msg').innerHTML = html;
+    document.getElementById('actions').innerHTML =
+      '<a class="btn" href="' + projectPath + '/ctms_consult/login.php">Sign in to Consultancy directly</a>' +
+      '<a class="btn ghost" href="javascript:history.back()">Go back</a>';
+  }
+
+  // The token is stored by the CTMS frontend after login (api.js saveToken).
+  // ctms_token is the one in use; the others are checked so this keeps working
+  // if that name ever changes.
+  function findToken() {
+    var keys = ['ctms_token', 'token', 'auth_token'];
+    for (var i = 0; i < keys.length; i++) {
+      var v = localStorage.getItem(keys[i]);
+      if (v) return v;
+    }
+    // ctms_session holds the user object, and may carry the token too
+    var s = localStorage.getItem('ctms_session');
+    if (s && s.charAt(0) === '{') {
+      try { var o = JSON.parse(s); if (o && o.token) return o.token; } catch (e) {}
+    }
+    return null;
+  }
+
+  var token = findToken();
+  var returnTo = new URLSearchParams(window.location.search).get('return_to') || '';
+  var mode = new URLSearchParams(window.location.search).get('mode');
+  if (mode !== 'direct' && mode !== 'guided') mode = 'guided';
+  if (!token) {
+    fail('You are not signed in',
+      'This tab signs you in to the Consultancy platform using your CTMS login. ' +
+      'No CTMS session was found in this browser, so please sign in to CTMS Core first ' +
+      'and then open the Consultancy tab again.');
+    return;
+  }
+
+  fetch(API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+    body: JSON.stringify({ return_to: returnTo, mode: mode })
+  })
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+    .then(function (res) {
+      if (!res.ok || !res.body || !res.body.url) {
+        var why = (res.body && res.body.error) ? res.body.error : 'The server did not return a sign-in link.';
+        fail('Could not open the Consultancy platform',
+          why + '<br><br>Your CTMS session may have expired. Sign in to CTMS Core again and retry.');
+        return;
+      }
+
+      /*
+       * The link must be absolute. If it comes back root-relative — which is
+       * what happens when the page is reached through the development server's
+       * proxy — the browser would resolve it against THIS host and port, land
+       * on the CTMS application by mistake, and the tab would appear to open
+       * and immediately vanish. So it is checked rather than trusted.
+       */
+      var target = String(res.body.url);
+      if (target.charAt(0) === '/') {
+        console.error('[Consultancy] the server returned a relative link:', target);
+        fail('The sign-in link was incomplete',
+          'The server returned a link without an address, so it cannot be followed safely.' +
+          '<br><br><code>' + target + '</code>');
+        return;
+      }
+      console.log('[Consultancy] handing over to', target);
+      window.location.replace(target);
+    })
+    .catch(function (e) {
+      fail('Could not reach the server',
+        'The sign-in request did not complete. Check that you are still connected to the network.' +
+        '<br><br><code>' + (e && e.message ? e.message : 'network error') + '</code>');
+    });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+# ============================================================
+# .htaccess — ctms_server/api/
+#
+# Forces Apache to forward the Authorization header to PHP.
+#
+# WHY THIS IS NEEDED:
+# On many XAMPP/Apache configurations, the Authorization header
+# is silently stripped before it reaches PHP, even though the
+# browser sends it correctly. This is a long-standing Apache
+# behavior (not a bug in our code) that affects any app using
+# Bearer token authentication. The rule below is the standard
+# fix — it tells Apache's rewrite engine to copy the incoming
+# Authorization header into an environment variable PHP can read.
+# ============================================================
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{HTTP:Authorization} ^(.*)
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%1]
+</IfModule>
+
+# Allow CORS preflight (OPTIONS) requests through without
+# Apache blocking them before PHP gets a chance to respond
+<IfModule mod_headers.c>
+    SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
+</IfModule>
+
+# ============================================================
+# SEC-015: Orphaned legacy endpoints.
+# These files still `require` the long-deleted ../config/*.php
+# files, so they can only ever throw a PHP fatal error (HTTP 500)
+# that leaks filesystem paths. They are not used by the React
+# frontend, so we fail them closed at the web-server layer.
+# (Delete the files permanently at your convenience.)
+# ============================================================
+<FilesMatch "^(ocr_api|report_api|payment_api|sample_api|notifications|report_generate_backup)\.php$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order Allow,Deny
+        Deny from all
+    </IfModule>
+</FilesMatch>

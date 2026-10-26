@@ -1,0 +1,3 @@
+<FilesMatch "\.(sql|sql\.gz)$">
+  Require all denied
+</FilesMatch>

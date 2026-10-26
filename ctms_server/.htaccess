@@ -1,0 +1,42 @@
+# CTMS .htaccess — Apache Security Configuration
+# Place this in /htdocs/ctms/.htaccess
+
+# ── Security Headers ──────────────────────────────────────────
+<IfModule mod_headers.c>
+    # X-Frame-Options and Content-Security-Policy are set per-response in
+    # api/db.php — setting them HERE TOO produced duplicate headers
+    # (ZAP Medium). Static assets don't need them.
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "no-referrer"
+    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    # SEC: don't advertise the PHP version to the whole network
+    Header unset X-Powered-By
+</IfModule>
+
+# ── Disable directory browsing ────────────────────────────────
+Options -Indexes
+
+# ── Prevent access to hidden files (.htaccess, .env, etc.) ───
+<FilesMatch "^\.">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order Allow,Deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# ── PHP settings ─────────────────────────────────────────────
+<IfModule mod_php8.c>
+    php_flag display_errors Off
+    php_flag log_errors On
+    php_value error_log "../logs/php_errors.log"
+    php_value upload_max_filesize 10M
+    php_value post_max_size 12M
+    php_value max_execution_time 60
+    php_value session.cookie_httponly 1
+    php_value session.use_strict_mode 1
+    php_value session.cookie_samesite "Strict"
+</IfModule>
