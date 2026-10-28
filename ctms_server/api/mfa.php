@@ -62,7 +62,7 @@ if ($action === 'setup_confirm') {
     $q = $pdo->prepare('SELECT secret_ciphertext,enabled_at FROM ctms_user_mfa WHERE user_id=?');
     $q->execute([$userId]); $mfa = $q->fetch(PDO::FETCH_ASSOC);
     if (!$mfa || $mfa['enabled_at']) { http_response_code(409); echo json_encode(['error'=>'MFA setup is no longer pending.']); exit; }
-    $secret = ctms_mfa_decrypt($mfa['secret_ciphertext']);
+    $secret = ctms_mfa_load_secret($pdo, (int)$userId, (string)$mfa['secret_ciphertext']);
     if (!ctms_mfa_consume_totp($pdo, $userId, $secret, (string)($data['code'] ?? ''))) {
         ctms_auth_failed($pdo, 'mfa-user:' . $userId, 'MFA_SETUP_FAILED', $userId);
         http_response_code(401); echo json_encode(['error'=>'That code did not match. Check your device clock and try its current code.']); exit;
@@ -91,7 +91,7 @@ if ($action === 'login_verify') {
     $code = trim((string)($data['code'] ?? ''));
     $valid = false;
     $usedRecovery = false;
-    if ($ciphertext && preg_match('/^\d{6}$/', $code)) $valid = ctms_mfa_consume_totp($pdo, $userId, ctms_mfa_decrypt($ciphertext), $code);
+    if ($ciphertext && preg_match('/^\d{6}$/', $code)) $valid = ctms_mfa_consume_totp($pdo, $userId, ctms_mfa_load_secret($pdo, (int)$userId, (string)$ciphertext), $code);
     elseif ($code !== '') { $valid = ctms_mfa_use_recovery_code($pdo, $userId, $code); $usedRecovery = $valid; }
     if (!$valid) {
         $delay = ctms_auth_failed($pdo, (string)$identifier, 'MFA_LOGIN_FAILED', $userId);

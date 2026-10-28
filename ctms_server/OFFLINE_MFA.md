@@ -24,6 +24,6 @@ Account cooldowns increase after repeated failures, cap at 15 minutes, and clear
 
 The API creates its additive MFA tables on first use if its MySQL account has `CREATE TABLE` permission. Otherwise import `sql/20261021_offline_mfa.sql` into `ctms_db` once. Do not edit or copy the MFA secret values manually.
 
-Keep the existing protected `JWT_SECRET` configuration backed up with the database backup. CTMS derives its MFA-at-rest encryption key from that persistent server secret; losing or changing it makes existing enrollments unreadable and requires users to enroll again.
+MFA secrets are encrypted with a dedicated key stored outside the web root (by default `ctms_config/mfa_secret.key`, or the path in `CTMS_MFA_KEY_FILE`). Back that file up together with the database. It is no longer derived from `JWT_SECRET`, so rotating the JWT secret does not affect enrolled authenticators. Enrollments created before the key was separated are re-encrypted automatically the first time they are used. Losing the key file (or restoring the database without it) makes existing enrollments unreadable and requires users to enroll again.
 
 The MFA setup QR code and sign-in codes are sensitive. For other computers connecting over LAN or Eduroam, serve CTMS over **HTTPS using a certificate trusted by those computers**. Offline does not mean unencrypted: plain HTTP exposes passwords and enrollment secrets to anyone who can observe that network traffic.

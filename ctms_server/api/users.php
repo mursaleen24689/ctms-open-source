@@ -125,10 +125,12 @@ if ($method === 'POST') {
             echo json_encode(["error" => "Only a CTMS Super Administrator may assign the Consultancy Super Administrator role."]);
             exit();
         }
-        $consultancyCanInvoice = !empty($data['consultancy_can_create_invoice'])
-            || in_array($db_role, ['admin', 'superadmin'], true)
-            || in_array($consultancyRole, ['superadmin', 'admin'], true)
-            || ($consultancyRole === 'reception' && !array_key_exists('consultancy_can_create_invoice', $data)) ? 1 : 0;
+        // Consultancy invoice creation is a named assignment, not a property of
+        // a role: a Consultancy administrator does not automatically get it.
+        // Only the Super Administrator may grant it, so it can be handed to the
+        // PA and moved to someone else if the PA is away.
+        $consultancyCanInvoice = (($tokenData['role'] ?? '') === 'superadmin'
+            && !empty($data['consultancy_can_create_invoice'])) ? 1 : 0;
         $canReview = !empty($data['can_technical_review']) ? 1 : 0;
         if ($canReview && ($tokenData['role'] ?? '') !== 'superadmin') {
             http_response_code(403);
@@ -180,6 +182,14 @@ if ($method === 'PUT') {
     if (!$existing) {
         http_response_code(404);
         echo json_encode(["error" => "User not found"]);
+        exit();
+    }
+
+    // SEC: an Administrator may never touch a Superadmin account
+    // (deactivate, rename, demote, or rotate its password).
+    if (($existing['role'] ?? '') === 'superadmin' && ($tokenData['role'] ?? '') !== 'superadmin') {
+        http_response_code(403);
+        echo json_encode(["error" => "Permission denied: only a Superadmin can modify a Superadmin account."]);
         exit();
     }
 
@@ -267,26 +277,13 @@ if ($method === 'PUT') {
         $updates[] = "consultancy_role = ?";
         $params[]  = $consultancyRole;
     }
-    if (array_key_exists('consultancy_can_create_invoice', $data)) {
-        $consultancyRole = (string)($data['consultancy_role'] ?? '');
-        if ($consultancyRole === '') {
-            $roleStmt = $pdo->prepare('SELECT consultancy_role FROM users WHERE id = ?');
-            $roleStmt->execute([$id]);
-            $consultancyRole = (string)$roleStmt->fetchColumn();
-        }
-        $accountRoleStmt = $pdo->prepare('SELECT role FROM users WHERE id = ?');
-        $accountRoleStmt->execute([$id]);
-        $accountRole = (string)$accountRoleStmt->fetchColumn();
-        $canInvoice = !empty($data['consultancy_can_create_invoice'])
-            || in_array($accountRole, ['admin', 'superadmin'], true)
-            || in_array($consultancyRole, ['superadmin', 'admin'], true) ? 1 : 0;
+    if (array_key_exists('consultancy_can_create_invoice', $data)
+        && ($tokenData['role'] ?? '') === 'superadmin') {
+        // Only the Super Administrator may grant or withdraw invoice creation.
+        // Other managers still edit the account; this one permission is left as
+        // it is rather than rejected, so their normal edits keep working.
         $updates[] = "consultancy_can_create_invoice = ?";
-        $params[] = $canInvoice;
-    } elseif (array_key_exists('consultancy_role', $data)) {
-        $consultancyRole = (string)$data['consultancy_role'];
-        if (in_array($consultancyRole, ['superadmin', 'admin', 'reception'], true)) {
-            $updates[] = "consultancy_can_create_invoice = 1";
-        }
+        $params[] = !empty($data['consultancy_can_create_invoice']) ? 1 : 0;
     }
     if (array_key_exists('can_technical_review', $data)) {
         if (($tokenData['role'] ?? '') !== 'superadmin') {

@@ -2,9 +2,56 @@
 declare(strict_types=1);
 
 /** Shared offline TOTP, login-ticket, and local authentication alert helpers. */
+
+// MFA data is encrypted with its own key file, NOT with a key derived from
+// JWT_SECRET. Rotating the JWT secret (the correct response to a leak) must
+// not make every enrolled authenticator unreadable.
+function ctms_mfa_key_file(): string
+{
+    $configured = getenv('CTMS_MFA_KEY_FILE');
+    if (is_string($configured) && $configured !== '') return $configured;
+    return dirname(__DIR__, 3) . DIRECTORY_SEPARATOR . 'ctms_config' . DIRECTORY_SEPARATOR . 'mfa_secret.key';
+}
+
 function ctms_mfa_key(): string
 {
-    return hash_hmac('sha256', 'ctms-mfa-secret-encryption-v1', (string)JWT_SECRET, true);
+    static $key = null;
+    if ($key !== null) return $key;
+    $file = ctms_mfa_key_file();
+    $decode = static function (string $value): string {
+        $raw = base64_decode(trim($value), true);
+        return ($raw !== false && strlen($raw) >= 32) ? $raw : '';
+    };
+    if (is_file($file) && is_readable($file)) {
+        $raw = $decode((string)file_get_contents($file));
+        if ($raw !== '') return $key = $raw;
+        throw new RuntimeException('The MFA key file is not valid.');
+    }
+    // First use: create a stable random key, exactly once across processes.
+    $material = base64_encode(random_bytes(32));
+    $handle = @fopen($file, 'x');
+    if ($handle !== false) {
+        $written = fwrite($handle, $material);
+        fflush($handle);
+        fclose($handle);
+        if ($written !== strlen($material)) {
+            @unlink($file);
+            throw new RuntimeException('The MFA key file could not be saved.');
+        }
+    }
+    if (!is_file($file) || !is_readable($file)) {
+        throw new RuntimeException('The MFA key file could not be created.');
+    }
+    $raw = $decode((string)file_get_contents($file));
+    if ($raw === '') throw new RuntimeException('The MFA key file is not valid.');
+    return $key = $raw;
+}
+
+/** Pre-upgrade enrollments were encrypted under a key derived from JWT_SECRET. */
+function ctms_mfa_legacy_key(): string
+{
+    return hash_hmac('sha256', 'ctms-mfa-secret-encryption-v1',
+        defined('JWT_SECRET') ? (string)JWT_SECRET : '', true);
 }
 
 function ctms_mfa_ensure_schema(PDO $pdo): void
@@ -71,10 +118,46 @@ function ctms_mfa_encrypt(string $plain): string
 
 function ctms_mfa_decrypt(string $encoded): string
 {
+    [$plain] = ctms_mfa_decrypt_ex($encoded);
+    return $plain;
+}
+
+/**
+ * Decrypt with the dedicated key, falling back to the legacy JWT-derived key
+ * so enrollments created before the separation keep working. The second
+ * element of the result is true when the legacy key was needed.
+ *
+ * @return array{0: string, 1: bool}
+ */
+function ctms_mfa_decrypt_ex(string $encoded): array
+{
     $packed = base64_decode($encoded, true);
     if ($packed === false || strlen($packed) < 29) throw new RuntimeException('Stored MFA secret is invalid.');
-    $plain = openssl_decrypt(substr($packed, 28), 'aes-256-gcm', ctms_mfa_key(), OPENSSL_RAW_DATA, substr($packed, 0, 12), substr($packed, 12, 16), 'ctms-user-mfa-v1');
-    if ($plain === false) throw new RuntimeException('MFA secret could not be decrypted.');
+    $iv = substr($packed, 0, 12);
+    $tag = substr($packed, 12, 16);
+    $payload = substr($packed, 28);
+    $plain = openssl_decrypt($payload, 'aes-256-gcm', ctms_mfa_key(), OPENSSL_RAW_DATA, $iv, $tag, 'ctms-user-mfa-v1');
+    if ($plain !== false) return [$plain, false];
+    $legacy = ctms_mfa_legacy_key();
+    if ($legacy !== '') {
+        $plain = openssl_decrypt($payload, 'aes-256-gcm', $legacy, OPENSSL_RAW_DATA, $iv, $tag, 'ctms-user-mfa-v1');
+        if ($plain !== false) return [$plain, true];
+    }
+    throw new RuntimeException('MFA secret could not be decrypted.');
+}
+
+/** Load a user's MFA secret and migrate it to the dedicated key when needed. */
+function ctms_mfa_load_secret(PDO $pdo, int $userId, string $encoded): string
+{
+    [$plain, $legacy] = ctms_mfa_decrypt_ex($encoded);
+    if ($legacy) {
+        try {
+            $pdo->prepare('UPDATE ctms_user_mfa SET secret_ciphertext = ?, updated_at = NOW() WHERE user_id = ?')
+                ->execute([ctms_mfa_encrypt($plain), $userId]);
+        } catch (Throwable $e) {
+            error_log('[CTMS MFA] secret could not be re-encrypted under the dedicated key: ' . $e->getMessage());
+        }
+    }
     return $plain;
 }
 
@@ -218,9 +301,22 @@ function ctms_auth_succeeded(PDO $pdo, string $identifier): void
     $pdo->prepare('DELETE FROM ctms_auth_failures WHERE account_key=?')->execute([hash_hmac('sha256', strtolower(trim($identifier)), (string)JWT_SECRET)]);
 }
 
+function ctms_mfa_subkey(string $purpose): string
+{
+    return hash_hmac('sha256', $purpose, ctms_mfa_key(), true);
+}
+
 function ctms_mfa_recovery_hash(string $code): string
 {
-    return hash_hmac('sha256', strtoupper(preg_replace('/[^A-Z0-9]/i', '', $code)), (string)JWT_SECRET);
+    return hash_hmac('sha256', strtoupper(preg_replace('/[^A-Z0-9]/i', '', $code)),
+        ctms_mfa_subkey('ctms-mfa-recovery-v1'));
+}
+
+/** Codes issued before the dedicated key existed were hashed with JWT_SECRET. */
+function ctms_mfa_recovery_hash_legacy(string $code): string
+{
+    return hash_hmac('sha256', strtoupper(preg_replace('/[^A-Z0-9]/i', '', $code)),
+        defined('JWT_SECRET') ? (string)JWT_SECRET : '');
 }
 
 function ctms_mfa_issue_recovery_codes(PDO $pdo, int $userId): array
@@ -242,6 +338,9 @@ function ctms_mfa_use_recovery_code(PDO $pdo, int $userId, string $code): bool
     if (!preg_match('/^[A-F0-9]{10}$/i', $normalized)) return false;
     $stmt = $pdo->prepare('UPDATE ctms_mfa_recovery_codes SET used_at=NOW() WHERE user_id=? AND code_hash=? AND used_at IS NULL');
     $stmt->execute([$userId, ctms_mfa_recovery_hash($normalized)]);
+    if ($stmt->rowCount() === 1) return true;
+    // Codes issued before the key separation still match the legacy hash.
+    $stmt->execute([$userId, ctms_mfa_recovery_hash_legacy($normalized)]);
     return $stmt->rowCount() === 1;
 }
 ?>

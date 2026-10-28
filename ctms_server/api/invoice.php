@@ -25,6 +25,20 @@ if (ctms_user_lot_access_restricted($pdo, (int)$userId)) {
     http_response_code(403); echo json_encode(['error' => 'Global client and invoice records are unavailable to accounts limited to selected lots.']); exit;
 }
 
+// SEC: finance data (client PII, quotations, invoices, price master,
+// analytics) is management-only. Enforced centrally so new resources
+// cannot be added without inheriting the gate.
+$financeReadRoles  = ['superadmin', 'admin', 'hod'];
+$financeWriteRoles = ['superadmin', 'admin', 'hod'];
+if ($method === 'GET') {
+    $settingsOnly = ($_GET['resource'] ?? '') === 'settings';
+    ctms_require_role($settingsOnly ? ['superadmin', 'admin'] : $financeReadRoles, $tokenData,
+        'Finance records are restricted to management roles.');
+} else {
+    ctms_require_role($financeWriteRoles, $tokenData,
+        'Finance changes are restricted to management roles.');
+}
+
 // ── helpers ──────────────────────────────────────────────────
 function getSetting($pdo, $key, $default = '') {
     $s = $pdo->prepare("SELECT setting_value FROM system_settings WHERE setting_key = ? LIMIT 1");

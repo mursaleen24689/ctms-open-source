@@ -18,6 +18,17 @@ try {
 }
 date_default_timezone_set($ctmsTimezone);
 
+// SEC-014: never render PHP errors into an API response. XAMPP ships
+// display_errors=On, which leaked a full PDOException stack trace
+// (absolute paths, SQL) to any caller that triggered a 500. Errors are
+// still written to the server error log for operators.
+if (PHP_SAPI !== 'cli') {
+    ini_set('display_errors', '0');
+    ini_set('display_startup_errors', '0');
+    ini_set('log_errors', '1');
+    ini_set('html_errors', '0');
+}
+
 // ============================================================
 // api/db.php — CTMS API Database Connection & Token Helpers
 //
@@ -77,7 +88,9 @@ if (!headers_sent()) {
 
 // Handle browser preflight check (OPTIONS request)
 // Browsers send this before every real API request to ask "is this allowed?"
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+// Guarded because CLI scripts (migrations, cron, token tooling) include this
+// file without a request context.
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
@@ -104,12 +117,13 @@ if (!is_array($ctmsConfig) || empty($ctmsConfig['db_user'])) {
 }
 
 $host    = $ctmsConfig['db_host']   ?? '127.0.0.1';
+$port    = (int)($ctmsConfig['db_port'] ?? 3306);
 $db      = $ctmsConfig['db_name']   ?? 'ctms_db';
 $db_user = $ctmsConfig['db_user'];
 $db_pass = $ctmsConfig['db_pass']   ?? '';
 $charset = 'utf8mb4';
 
-$dsn = "mysql:host=$host;dbname=$db;charset=$charset";
+$dsn = "mysql:host=$host;port=$port;dbname=$db;charset=$charset";
 $options = [
     PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
@@ -372,6 +386,52 @@ function ctms_user_has_lot_access(PDO $pdo, int $userId, int $lotId, string $min
     } catch (Throwable $e) {
         return false;
     }
+}
+
+/**
+ * Key material for the printed report verification code.
+ * Stored in system_settings; when that row is missing we derive a
+ * per-deployment key from JWT_SECRET instead of falling back to a
+ * publicly known constant (which would make every report forgeable).
+ * An empty string means "cannot verify" — callers must fail closed.
+ */
+function ctms_verify_secret(PDO $pdo): string {
+    static $cached = null;
+    if ($cached !== null) return $cached;
+    try {
+        $st = $pdo->prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'verify_secret' LIMIT 1");
+        $st->execute();
+        $value = trim((string)$st->fetchColumn());
+        if ($value !== '') return $cached = $value;
+    } catch (\PDOException $e) { /* fall through to derivation */ }
+    $jwt = defined('JWT_SECRET') ? (string)JWT_SECRET : '';
+    if (strlen($jwt) < 16) return $cached = '';
+    return $cached = hash_hmac('sha256', 'ctms:report-verify:v1', $jwt);
+}
+
+/** Printed Verify Code: 8 hex chars of HMAC-SHA256(report number). */
+function ctms_verify_code(string $reportNo, string $secret): string {
+    if ($secret === '') return '';
+    return substr(hash_hmac('sha256', $reportNo, $secret), 0, 8);
+}
+
+/**
+ * Short-lived signature that lets an already open report page — or the
+ * archive/email helpers — ask for the report to be numbered and registered.
+ * Format: userId.expires.signature, bound to the user and the report scope.
+ */
+function ctms_report_issue_token(int $userId, string $scope, int $scopeId): string {
+    $expires = time() + (4 * 3600);
+    $sig = hash_hmac('sha256', 'ctms-report-issue-v1|' . $userId . '|' . $scope . '|' . $scopeId . '|' . $expires, (string)JWT_SECRET);
+    return $userId . '.' . $expires . '.' . $sig;
+}
+
+function ctms_report_issue_token_check(string $token, int $userId, string $scope, int $scopeId): bool {
+    if (!preg_match('/^(\d+)\.(\d{10})\.([0-9a-f]{64})$/', $token, $m)) return false;
+    if ((int)$m[1] !== $userId) return false;
+    if ((int)$m[2] < time()) return false;
+    $expected = hash_hmac('sha256', 'ctms-report-issue-v1|' . $userId . '|' . $scope . '|' . $scopeId . '|' . $m[2], (string)JWT_SECRET);
+    return hash_equals($expected, $m[3]);
 }
 
 function ctms_require_lot_access(PDO $pdo, int $userId, int $lotId, string $minimum = 'view'): void {

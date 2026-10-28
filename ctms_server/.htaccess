@@ -29,13 +29,16 @@ Options -Indexes
 </FilesMatch>
 
 # ── PHP settings ─────────────────────────────────────────────
-<IfModule mod_php8.c>
+# The guard used to read `mod_php8.c`, which is not the module name on
+# this XAMPP build (it is `php_module`), so every directive below was
+# silently ignored and display_errors stayed On. Corrected.
+<IfModule php_module>
     php_flag display_errors Off
     php_flag log_errors On
-    php_value error_log "../logs/php_errors.log"
-    php_value upload_max_filesize 10M
-    php_value post_max_size 12M
-    php_value max_execution_time 60
+    # Pinned to the values that were in force while this block was inert,
+    # so enabling the block does not change upload behaviour.
+    php_value upload_max_filesize 40M
+    php_value post_max_size 40M
     php_value session.cookie_httponly 1
     php_value session.use_strict_mode 1
     php_value session.cookie_samesite "Strict"
