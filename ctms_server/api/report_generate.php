@@ -68,9 +68,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
-// GET: authenticate via a one-time ticket or Authorization header.
+// GET: authenticate via a one-time ticket, a signed print token, or the
+// Authorization header.
 $ticket = $_GET['ticket'] ?? '';
-if ($ticket !== '') {
+if (!empty($_GET['issue']) && !empty($_GET['issue_token'])) {
+    // Print / Word request from an already open report page. This is checked
+    // before the download ticket because the page URL still carries the
+    // ticket that was consumed when the page was opened. Only the user is
+    // identified here; the signed scope binding is verified below, and every
+    // role and lot access check still runs.
+    if (!preg_match('/^(\d+)\.(\d{10})\.([0-9a-f]{64})$/', (string)$_GET['issue_token'], $m) || (int)$m[2] < time()) {
+        http_response_code(403); echo '<h2>This print link has expired. Reopen the report and print it again.</h2>'; exit;
+    }
+    $uStmt = $pdo->prepare("SELECT id, role, profile_pic FROM users WHERE id = ? AND is_active = 1 AND is_deleted = 0 AND must_change_password = 0");
+    $uStmt->execute([(int)$m[1]]);
+    $uRow = $uStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$uRow) {
+        http_response_code(403); echo '<h2>This print link has expired. Reopen the report and print it again.</h2>'; exit;
+    }
+    $role = (string)$uRow['role'];
+    if ($role === 'reception' && strtolower((string)($uRow['profile_pic'] ?? '')) === 'pa') $role = 'pa';
+    $user = ['user_id' => (int)$uRow['id'], 'role' => $role];
+} elseif ($ticket !== '') {
     $scope = !empty($_GET['sample_id']) ? 'report_sample' : 'report_lot';
     $t = validate_download_ticket($pdo, $ticket, $scope);
     $requestedScopeId = $scope === 'report_sample' ? (int)($_GET['sample_id'] ?? 0) : (int)($_GET['lot_id'] ?? 0);
@@ -126,6 +145,26 @@ if ($sample_id) {
 }
 
 if (empty($samples)) { echo '<h2>No samples found.</h2>'; exit; }
+
+// ?issue=1 (with a valid signature) means the user pressed Print or
+// Download in Word. Only then is a number allocated and the report
+// registered; a plain preview never consumes a number.
+$report_scope    = $sample_id ? 'report_sample' : 'report_lot';
+$report_scope_id = $sample_id ? $sample_id : $lot_id;
+$issue_token     = ctms_report_issue_token((int)($user['user_id'] ?? 0), $report_scope, (int)$report_scope_id);
+$issue_mode      = false;
+if (!empty($_GET['issue'])) {
+    if (!ctms_report_issue_token_check($_GET['issue_token'] ?? '', (int)($user['user_id'] ?? 0), $report_scope, (int)$report_scope_id)) {
+        http_response_code(403);
+        echo '<h2>This print link has expired. Reopen the report and print it again.</h2>';
+        exit;
+    }
+    $issue_mode = true;
+    $issue_token = (string)$_GET['issue_token'];
+}
+$GLOBALS['ctms_report_issue_mode']  = $issue_mode;
+$GLOBALS['ctms_report_issued']      = [];
+$GLOBALS['ctms_report_pending']     = false;
 
 $is_cheque = strtoupper($lot['agency_type'] ?? '') === 'CHEQUE';
 
@@ -215,13 +254,13 @@ function register_report($pdo, $sid, $lot_number, $report_number, $format_used,
 function verify_settings($pdo) {
     static $cache = null;
     if ($cache !== null) return $cache;
-    $base = ''; $secret = 'ctms';
+    $base = ''; $secret = '';
     try {
         $rows = $pdo->query("SELECT setting_key, setting_value FROM system_settings
                              WHERE setting_key IN ('verify_base_url','verify_secret')")->fetchAll(PDO::FETCH_KEY_PAIR);
         $base   = trim((string)($rows['verify_base_url'] ?? ''));
-        $secret = (string)($rows['verify_secret'] ?? 'ctms');
     } catch (\PDOException $e) { /* defaults */ }
+    $secret = ctms_verify_secret($pdo);
     if ($base === '') {
         $scheme = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
         $base = $scheme . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost')
@@ -235,8 +274,36 @@ function verify_checksum($report_no, $secret) {
     // SEC-003: HMAC-SHA256 truncated to 8 hex chars (the printed
     // Verify Code) instead of the old truncated MD5. verify.php still
     // accepts the previously stored MD5 value for old reports.
-    return substr(hash_hmac('sha256', $report_no, $secret), 0, 8);
+    return ctms_verify_code((string)$report_no, (string)$secret);
 }
+
+// ── Numbering: provisional on preview, issued on print (H-02) ──
+// Looking at a report must not consume a series number. A preview only
+// reads the next number for display; the number is allocated and the
+// report is registered when the page is explicitly printed or exported.
+function peek_report_number($pdo, $key) {
+    if ($key === '') return null;
+    static $shown = [];   // several samples in one document preview in sequence
+    try {
+        // Seeding a missing series does not consume a number.
+        $pdo->prepare("INSERT IGNORE INTO report_counters (counter_key, next_number) VALUES (?, 1)")
+            ->execute([$key]);
+        $st = $pdo->prepare("SELECT next_number FROM report_counters WHERE counter_key = ?");
+        $st->execute([$key]);
+        $n = $st->fetchColumn();
+        if ($n === false) return null;
+        $n = (int)$n + ($shown[$key] ?? 0);
+        $shown[$key] = ($shown[$key] ?? 0) + 1;
+        return $key . '-' . str_pad((string)$n, 4, '0', STR_PAD_LEFT);
+    } catch (\PDOException $e) {
+        return null;
+    }
+}
+
+// A short-lived signature that lets the report page ask the server to
+// number the report when the user presses Print / Download in Word.
+// ctms_report_issue_token()/ctms_report_issue_token_check() live in db.php
+// so the archive ZIP/email helpers can request an issued report too.
 
 // ── Electronics sample-type codes for report numbering ──────
 // Report number carries the sample type: EL-HF-0001 (handfree),
@@ -635,9 +702,7 @@ function build_sample_page($sample, $is_cheque, $lot, $pdo) {
     // UPDATE ... SET next_number = LAST_INSERT_ID(next_number + 1)
     // makes the increment atomic: two staff members generating
     // reports at the same moment can never receive the same number.
-    // NOTE: every open of this page consumes the next number of the
-    // series until Sprint 2 archives generated numbers into the
-    // reports table — open deliberately.
+    // A preview only peeks at the next number; it is consumed on print.
     if (!empty($oes_rows) && !empty($tensile_rows))     $counter_key = 'OES-T';
     elseif (!empty($xrf_rows) && !empty($tensile_rows)) $counter_key = 'X-T';
     elseif (!empty($tensile_rows))                      $counter_key = 'T';
@@ -650,23 +715,35 @@ function build_sample_page($sample, $is_cheque, $lot, $pdo) {
     // its original number instead of burning the next in the series.
     $report_no = find_existing_report($pdo, $sid);
     if ($report_no === null) {
-        $report_no = next_report_number($pdo, $counter_key);
-        if ($report_no === null) {
-            // Counter table missing or series key not seeded — legacy format
-            $report_no = 'RPT-' . str_pad($sid, 4, '0', STR_PAD_LEFT);
+        if (!empty($GLOBALS['ctms_report_issue_mode'])) {
+            $report_no = next_report_number($pdo, $counter_key);
+            if ($report_no === null) {
+                // Counter table missing or series key not seeded — legacy format
+                $report_no = 'RPT-' . str_pad($sid, 4, '0', STR_PAD_LEFT);
+            }
+            register_report(
+                $pdo, $sid,
+                $sample['lot_number']      ?? ($lot['lot_number'] ?? ''),
+                $report_no,
+                $counter_key !== '' ? $counter_key : 'LEGACY',
+                $type_of_sample,
+                trim((string)($sample['sd_number'] ?? '')) !== ''
+                    ? (string)$sample['sd_number']
+                    : (string)($sample['reference_number'] ?? ''),
+                $customer_name,
+                (int)($user['user_id'] ?? $user['id'] ?? 0)
+            );
+            $GLOBALS['ctms_report_issued'][] = $report_no;
+        } else {
+            $report_no = peek_report_number($pdo, $counter_key);
+            if ($report_no === null) {
+                // Legacy RPT-#### format is derived from the sample id, so it
+                // is stable and needs no counter.
+                $report_no = 'RPT-' . str_pad($sid, 4, '0', STR_PAD_LEFT);
+            } else {
+                $GLOBALS['ctms_report_pending'] = true;
+            }
         }
-        register_report(
-            $pdo, $sid,
-            $sample['lot_number']      ?? ($lot['lot_number'] ?? ''),
-            $report_no,
-            $counter_key !== '' ? $counter_key : 'LEGACY',
-            $type_of_sample,
-            trim((string)($sample['sd_number'] ?? '')) !== ''
-                ? (string)$sample['sd_number']
-                : (string)($sample['reference_number'] ?? ''),
-            $customer_name,
-            (int)($user['user_id'] ?? $user['id'] ?? 0)
-        );
     }
 
     // ── Sprint 1 / D-04: real test date, not "today" ───────────
@@ -780,7 +857,7 @@ function build_sample_page($sample, $is_cheque, $lot, $pdo) {
     }
     $qr_box = '<div class="qr-box">'
         . $qr_markup
-        . '<div class="qr-caption">Verify: <span class="mono">' . htmlspecialchars($report_no) . '</span>'
+        . '<div class="qr-caption">Verify: <span class="mono" data-report-number="' . htmlspecialchars($report_no, ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($report_no) . '</span>'
         . ' &nbsp;|&nbsp; Code <span class="mono">' . htmlspecialchars($vcode) . '</span></div>'
         . '</div>';
 
@@ -838,7 +915,7 @@ function build_sample_page($sample, $is_cheque, $lot, $pdo) {
   <table class="info-table">
     <tr>
       <td class="info-left"><strong>Customer Name:</strong> ' . htmlspecialchars($customer_name) . '</td>
-      <td class="info-right"><strong>Test Report No:</strong> ' . htmlspecialchars($report_no) . '</td>
+      <td class="info-right"><strong>Test Report No:</strong> <span data-report-number="' . htmlspecialchars($report_no, ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($report_no) . '</span></td>
     </tr>
     <tr>
       <td class="info-left"><strong>Type of sample:</strong> ' . htmlspecialchars($type_of_sample) . '</td>
@@ -1232,10 +1309,84 @@ body {
 </head>
 <body>
 <button class="word-btn" onclick="exportReportToWord()">Download in Word (.doc)</button>
-<button class="print-btn" onclick="window.print()">Print / Save PDF</button>
-<div class="report-action-note">CTMS automatically saves a PDF copy when this report is opened. ZIP and email dispatch also generate any missing PDF copies.</div>
+<button class="print-btn" onclick="ctmsIssueThenPrint()">Print / Save PDF</button>
+<div class="report-action-note">The report number is issued when you print or export this report. CTMS then saves a PDF copy for the archive; ZIP and email dispatch also generate any missing PDF copies.</div>
 <?= $pages_html ?>
 <script src="<?= htmlspecialchars($reportAssetBase . '/qrcode.min.js', ENT_QUOTES, 'UTF-8') ?>"></script>
+<script>
+(function () {
+  var PENDING = <?= $GLOBALS['ctms_report_pending'] ? 'true' : 'false' ?>;
+  var TOKEN   = <?= json_encode((string)$issue_token, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+  var base = null;
+  try {
+    base = new URL(window.location.href);
+    base.searchParams.delete('ajax');
+    base.searchParams.delete('autoprint');
+    base.searchParams.delete('ticket');
+    base.searchParams.delete('word_ticket');
+    base.searchParams.set('issue', '1');
+    base.searchParams.set('issue_token', TOKEN);
+  } catch (e) { base = null; }
+  var ISSUE_BASE = base ? base.toString() : '';
+  var ISSUE_URL  = ISSUE_BASE ? ISSUE_BASE + '&ajax=1' : '';
+  var issued = !PENDING;
+  var reloading = false;
+
+  function currentNumbers() {
+    var seen = [];
+    Array.prototype.forEach.call(document.querySelectorAll('[data-report-number]'), function (node) {
+      var v = node.getAttribute('data-report-number');
+      if (seen.indexOf(v) === -1) seen.push(v);
+    });
+    return seen;
+  }
+  function applyResult(res) {
+    if (!res || res.ok !== true || !Array.isArray(res.numbers)) return false;
+    issued = true;
+    var got = res.numbers.map(String), have = currentNumbers();
+    return got.length === have.length && got.every(function (v, i) { return v === have[i]; });
+  }
+  function reloadIssued() {
+    if (reloading) return;
+    reloading = true;
+    window.location.replace(ISSUE_BASE + '&autoprint=1');
+  }
+
+  // Number and register the report only when the user asks for a printed copy.
+  window.ctmsIssueThenPrint = function () {
+    if (issued || !ISSUE_URL) { window.print(); return; }
+    fetch(ISSUE_URL, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (!applyResult(res)) { reloadIssued(); return; }
+        window.print();
+      })
+      .catch(function () { alert('Could not confirm the report number. Reopen the report and try again.'); });
+  };
+
+  // Browser menu / Ctrl+P path: issue first, while the print dialog is opening.
+  window.addEventListener('beforeprint', function () {
+    if (issued || !ISSUE_URL) return;
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', ISSUE_URL, false);
+      xhr.send(null);
+      applyResult(JSON.parse(xhr.responseText));
+    } catch (e) { /* the Print button reports failures */ }
+  });
+
+  window.ctmsWordIssueParams = function (url) {
+    if (issued || !TOKEN) return;
+    url.searchParams.set('issue', '1');
+    url.searchParams.set('issue_token', TOKEN);
+  };
+  window.ctmsWordIssued = function () { issued = true; };
+
+  if (issued && new URLSearchParams(window.location.search).get('autoprint') === '1') {
+    window.addEventListener('load', function () { setTimeout(function () { window.print(); }, 150); });
+  }
+})();
+</script>
 <script>
 async function exportReportToWord() {
   try {
@@ -1245,12 +1396,14 @@ async function exportReportToWord() {
     wordUrl.searchParams.set('format', 'word');
     wordUrl.searchParams.set('ticket', wordTicket);
     wordUrl.searchParams.delete('word_ticket');
+    if (window.ctmsWordIssueParams) window.ctmsWordIssueParams(wordUrl);
     var response = await fetch(wordUrl.toString(), { credentials: 'same-origin', headers: { 'Accept': 'application/msword' } });
     var wordBlob = await response.blob();
     if (!response.ok || !wordBlob.size || !/application\/msword/i.test(response.headers.get('Content-Type') || '')) {
       var serverMessage = await wordBlob.text();
       throw new Error(serverMessage.slice(0, 320) || ('HTTP ' + response.status));
     }
+    if (window.ctmsWordIssued) window.ctmsWordIssued();
     var wordFilename = (document.title || 'Report').replace(/[^a-zA-Z0-9_-]/g, '_') + '.doc';
     if (window.navigator && typeof window.navigator.msSaveOrOpenBlob === 'function') {
       window.navigator.msSaveOrOpenBlob(wordBlob, wordFilename);
@@ -1417,12 +1570,24 @@ if ($sample_id > 0) {
         $reportHtml = str_replace('</head>', $draftCss . '</head>', $reportHtml);
         $reportHtml = str_replace('<body>', '<body>' . $draftStamp, $reportHtml);
     }
-    try {
-        require_once __DIR__ . '/report_pdf_lib.php';
-        ctms_save_report_pdf($pdo, $sample_id, $reportHtml);
-    } catch (Throwable $e) {
-        error_log('[CTMS] automatic PDF generation failed for sample ' . $sample_id . ': ' . $e->getMessage());
+    // A PDF copy is the archived document, so only store it once the report
+    // has a registered number (existing report or explicit print/export).
+    if (find_existing_report($pdo, $sample_id) !== null) {
+        try {
+            require_once __DIR__ . '/report_pdf_lib.php';
+            ctms_save_report_pdf($pdo, $sample_id, $reportHtml);
+        } catch (Throwable $e) {
+            error_log('[CTMS] automatic PDF generation failed for sample ' . $sample_id . ': ' . $e->getMessage());
+        }
     }
+}
+if ($issue_mode && !empty($_GET['ajax'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode([
+        'ok'      => true,
+        'numbers' => $GLOBALS['ctms_report_issued'],
+    ]);
+    exit;
 }
 if (strtolower((string)($_GET['format'] ?? '')) === 'word') {
     try {

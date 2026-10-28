@@ -10,7 +10,10 @@ function ctms_ensure_report_pdf_for_sample(int $sampleId, int $userId, string $r
         throw new RuntimeException('The report service is not under the configured web root.');
     }
     $webApiPath = str_replace('\\', '/', substr($apiDirectory, strlen(rtrim($documentRoot, '\\/'))));
-    $url = 'http://127.0.0.1' . rtrim($webApiPath, '/') . '/report_generate.php?sample_id=' . $sampleId;
+    // An archived report must be numbered and registered, so ask for the
+    // explicit issue action the print/Word buttons use.
+    $issue = '&issue=1&issue_token=' . rawurlencode(ctms_report_issue_token($userId, 'report_sample', $sampleId));
+    $url = 'http://127.0.0.1' . rtrim($webApiPath, '/') . '/report_generate.php?sample_id=' . $sampleId . $issue;
     $token = create_token($userId, $role);
     $context = stream_context_create(['http' => [
         'method' => 'GET',
@@ -43,7 +46,10 @@ function ctms_ensure_report_word_for_sample(int $sampleId, int $userId, string $
         throw new RuntimeException('The report service is not under the configured web root.');
     }
     $webApiPath = str_replace('\\', '/', substr($apiDirectory, strlen(rtrim($documentRoot, '\\/'))));
-    $url = 'http://127.0.0.1' . rtrim($webApiPath, '/') . '/report_generate.php?sample_id=' . $sampleId . '&format=word';
+    // The Word copy is part of the archived package, so it needs the same
+    // explicit issue action as the PDF and the on-screen export button.
+    $issue = '&issue=1&issue_token=' . rawurlencode(ctms_report_issue_token($userId, 'report_sample', $sampleId));
+    $url = 'http://127.0.0.1' . rtrim($webApiPath, '/') . '/report_generate.php?sample_id=' . $sampleId . '&format=word' . $issue;
     $token = create_token($userId, $role);
     $context = stream_context_create(['http' => [
         'method' => 'GET',
