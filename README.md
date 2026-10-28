@@ -36,6 +36,11 @@ Do not use sample credentials in a real deployment. Create a new administrator t
 - Review `GO_LIVE_READINESS.md` before exposing an installation to users.
 - Email, cloud backup, and consultancy integrations are optional and require separate credentials and configuration.
 
+## Release history
+
+See `CHANGELOG.md` for what changed in each release, including the security
+and reliability fixes, and the upgrade notes for existing installations.
+
 ## Contributing
 
 See `CONTRIBUTING.md` for the proposed development and disclosure process. Report security issues privately to the repository maintainers instead of posting exploit details publicly.
