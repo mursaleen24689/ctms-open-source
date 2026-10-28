@@ -143,6 +143,27 @@
           '<br><br><code>' + target + '</code>');
         return;
       }
+      /*
+       * Host-header poisoning guard: the ticket in this URL is a credential.
+       * Refuse to hand it to a different site and refuse to downgrade to
+       * plain HTTP from an HTTPS page.
+       */
+      var dest;
+      try { dest = new URL(target, window.location.href); } catch (e) { dest = null; }
+      function sameSite(a, b) {
+        a = a.toLowerCase(); b = b.toLowerCase();
+        return a === b || a.slice(-(b.length + 1)) === '.' + b || b.slice(-(a.length + 1)) === '.' + a;
+      }
+      if (!dest || !sameSite(dest.hostname, window.location.hostname) ||
+          (window.location.protocol === 'https:' && dest.protocol !== 'https:')) {
+        console.error('[Consultancy] refused an unexpected sign-in destination:', target);
+        fail('Unexpected sign-in destination',
+          'The sign-in link points to a different site (' +
+          (dest ? dest.hostname : 'invalid URL') + '), so it was not followed. ' +
+          'Contact the system administrator if this keeps happening.');
+        return;
+      }
+
       console.log('[Consultancy] handing over to', target);
       window.location.replace(target);
     })

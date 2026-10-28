@@ -2657,6 +2657,9 @@ function Dashboard({ user, userId = 0, role = 'admin', labStream = '', consultan
     try {
       const payload = { ...userForm };
       if (!isSuperadmin && !workflowCanConfigure) delete payload.can_technical_review;
+      // Invoice creation is the Super Administrator's to assign. Other managers
+      // can save the rest of the account without touching this permission.
+      if (!isSuperadmin) delete payload.consultancy_can_create_invoice;
       delete payload.lot_access_restricted;
       let savedUserId = Number(userForm.id || 0);
       if (isEditingUser) {
@@ -5030,7 +5033,7 @@ function Dashboard({ user, userId = 0, role = 'admin', labStream = '', consultan
                     </div>
                     <label style={S.fieldLabel}>Consultancy role</label>
                     <select value={userForm.consultancy_role || 'viewer'} disabled={!userForm.consultancy_access}
-                      onChange={e => setUserForm({ ...userForm, consultancy_role: e.target.value, consultancy_can_create_invoice: ['reception', 'admin', 'superadmin'].includes(e.target.value) })} style={S.fieldInput}>
+                      onChange={e => setUserForm({ ...userForm, consultancy_role: e.target.value })} style={S.fieldInput}>
                       <option value="viewer">Viewer</option>
                       <option value="reception">Reception</option>
                       <option value="technician">Technician</option>
@@ -5039,12 +5042,12 @@ function Dashboard({ user, userId = 0, role = 'admin', labStream = '', consultan
                       <option value="superadmin">Super Administrator</option>
                     </select>
                     <label style={{ ...S.fieldLabel, display: 'flex', alignItems: 'center', gap: 8, textTransform: 'none', marginTop: 10 }}>
-                      <input type="checkbox" disabled={!userForm.consultancy_access || ['admin', 'superadmin'].includes(userForm.consultancy_role) || ['admin', 'superadmin'].includes(userForm.role)} checked={!!userForm.consultancy_can_create_invoice || ['admin', 'superadmin'].includes(userForm.consultancy_role) || ['admin', 'superadmin'].includes(userForm.role)}
+                      <input type="checkbox" disabled={!userForm.consultancy_access || !isSuperadmin || userForm.role === 'superadmin' || userForm.consultancy_role === 'superadmin'} checked={!!userForm.consultancy_can_create_invoice || userForm.role === 'superadmin' || userForm.consultancy_role === 'superadmin'}
                         onChange={e => setUserForm({ ...userForm, consultancy_can_create_invoice: e.target.checked })} />
                       Can create Consultancy invoices
                     </label>
                     <div style={{ fontSize: 11, color: 'var(--text-soft)', marginLeft: 22 }}>
-                      Reception has this permission by default. CTMS and Consultancy administrators always keep it; other users can still view invoice details for testing and reports.
+                      Only a Super Administrator can assign this. Super Administrators always keep it, so they can hand it to someone else while the PA is away. Everyone else — including Consultancy administrators — can still view invoice details for testing and reports.
                     </div>
                   </div>
 
@@ -5124,7 +5127,7 @@ function Dashboard({ user, userId = 0, role = 'admin', labStream = '', consultan
                               <td style={S.td}><span style={{ color: Number(u.lot_access_restricted) ? 'var(--amber)' : 'var(--teal)', fontSize: 11, fontWeight: 700 }}>{Number(u.lot_access_restricted) ? `Restricted · ${Number(u.assigned_lot_count || 0)} lot(s)` : 'All role-permitted lots'}</span></td>
                               <td style={S.td}>
                                 <span style={{ color: Number(u.consultancy_access) ? 'var(--teal)' : 'var(--rust)', fontWeight: '700', fontSize: '12px' }}>
-                                  {Number(u.consultancy_access) ? `${u.consultancy_role || 'viewer'}${Number(u.consultancy_can_create_invoice) || ['admin','superadmin'].includes(u.role) || ['admin','superadmin'].includes(u.consultancy_role) ? ' · Invoice creation' : ' · Testing/reports only'}` : 'Blocked'}
+                                  {Number(u.consultancy_access) ? `${u.consultancy_role || 'viewer'}${Number(u.consultancy_can_create_invoice) || u.role === 'superadmin' || u.consultancy_role === 'superadmin' ? ' · Invoice creation' : ' · Testing/reports only'}` : 'Blocked'}
                                 </span>
                               </td>
                               <td style={S.td}>

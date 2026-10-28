@@ -312,7 +312,7 @@ include __DIR__ . '/inc/layout_top.php';
       <?php if ($canCreateInvoice): ?>
       <a class="btn btn-copper" href="<?= h(app_url('invoices.php?action=new')) ?>">+ New invoice</a>
       <?php else: ?>
-      <span class="hint">Invoice creation is handled by Reception. Open an invoice to see the requested tests.</span>
+      <span class="hint">Invoice creation is assigned by the CTMS Super Administrator. Open an invoice to see the requested tests.</span>
       <?php endif; ?>
       <form method="get" style="display:flex;gap:8px;align-items:center;margin-left:auto">
         <input type="hidden" name="action" value="list">

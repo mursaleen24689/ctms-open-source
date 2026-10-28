@@ -43,6 +43,7 @@ function db_target(array $cfg): array
     if (!in_array($mode, ['separate', 'merged'], true)) $mode = 'separate';
 
     $host = (string)($cfg['db_host'] ?? '127.0.0.1');
+    $port = (int)($cfg['db_port'] ?? 3306);
     $charset = (string)($cfg['db_charset'] ?? 'utf8mb4');
 
     if ($mode === 'merged') {
@@ -67,7 +68,7 @@ function db_target(array $cfg): array
     return [
         'mode'    => $mode,
         'label'   => $label,
-        'dsn'     => sprintf('mysql:host=%s;dbname=%s;charset=%s', $host, $name, $charset),
+        'dsn'     => sprintf('mysql:host=%s;port=%d;dbname=%s;charset=%s', $host, $port, $name, $charset),
         'name'    => $name,
         'user'    => $user,
         'pass'    => $pass,

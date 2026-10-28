@@ -361,15 +361,21 @@ function can_user(string ...$roles): bool {
     return $u && in_array($u['role'], $roles, true);
 }
 
-/** Invoice authoring is independently assignable; administrators always retain it. */
+/**
+ * Invoice authoring is a named assignment, not a role.
+ *
+ * The Super Administrator always keeps it, so it can be handed to someone
+ * covering for the PA, and taken back afterwards — the switch lives on the
+ * main CTMS Users screen. Every other account needs the explicit flag; a
+ * Consultancy administrator can run the whole workflow without being able to
+ * raise invoices.
+ */
 function can_create_consult_invoice(): bool {
     $u = current_user();
     if (!$u) return false;
-    if (in_array((string)$u['role'], ['superadmin', 'admin'], true)) return true;
-    if (array_key_exists('consultancy_can_create_invoice', $u)) {
-        return (int)$u['consultancy_can_create_invoice'] === 1;
-    }
-    return (string)$u['role'] === 'reception';
+    if ((string)$u['role'] === 'superadmin') return true;
+    return array_key_exists('consultancy_can_create_invoice', $u)
+        && (int)$u['consultancy_can_create_invoice'] === 1;
 }
 
 function login_user(array $u): void {
