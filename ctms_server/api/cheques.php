@@ -20,6 +20,16 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS cheque_records (
     updated_at  DATETIME NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
+// Serial numbers are allocated per (cheque_type, entry_date). Keeping the
+// next value in its own row lets the allocation statement lock it, so two
+// clerks saving at the same moment can never receive the same serial.
+$pdo->exec("CREATE TABLE IF NOT EXISTS cheque_serial_counters (
+    cheque_type VARCHAR(20) NOT NULL,
+    entry_date  DATE NOT NULL,
+    next_serial INT NOT NULL DEFAULT 1,
+    PRIMARY KEY (cheque_type, entry_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
 $pdo->exec("CREATE TABLE IF NOT EXISTS notifications (
     id         INT AUTO_INCREMENT PRIMARY KEY,
     user_id    INT NULL,
@@ -131,6 +141,7 @@ if ($method === 'POST') {
     }
 
     $cheque_type = strtolower($data['cheque_type'] ?? 'other');
+    if (!in_array($cheque_type, ['hmbl', 'other'], true)) $cheque_type = 'other';
     $cheque_no   = trim($data['cheque_no']    ?? '');
     $cheque_date = $data['cheque_date']        ?? date('Y-m-d');
     $bank_name   = trim($data['bank_name']    ?? '');
@@ -145,21 +156,42 @@ if ($method === 'POST') {
     }
     if ($cheque_type === 'hmbl') $bank_name = 'HABIB METROPOLITAN BANK';
 
-    $serialStmt = $pdo->prepare("SELECT COALESCE(MAX(serial_no),0) FROM cheque_records WHERE cheque_type = ? AND entry_date = ? AND is_deleted = 0");
-    $serialStmt->execute([$cheque_type, $entry_date]);
-    $next_serial = (int)$serialStmt->fetchColumn() + 1;
-
     // ── Auto-paginate: 40 entries per printed sheet ──────────────
     // Matches the physical submission sheet template — once a
     // sheet fills with 40 cheques, the next entry automatically
     // starts Sheet 2, and so on. No manual sheet number entry.
     $ENTRIES_PER_SHEET = 40;
-    $sheet_no = (int)ceil($next_serial / $ENTRIES_PER_SHEET);
-    if ($sheet_no < 1) $sheet_no = 1;
 
-    $pdo->prepare("INSERT INTO cheque_records (cheque_type,serial_no,cheque_no,cheque_date,bank_name,amount,remarks,sheet_no,entry_date,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)")
-        ->execute([$cheque_type,$next_serial,$cheque_no,$cheque_date,$bank_name,$amount,$remarks,$sheet_no,$entry_date,$tokenData['user_id']]);
-    $newChequeId = (int)$pdo->lastInsertId();
+    // H-09: allocate the serial with one locked UPDATE instead of a separate
+    // MAX(serial_no)+1 read, so concurrent entries cannot share a serial.
+    // LAST_INSERT_ID(expr) returns the value just stored (serial + 1).
+    $pdo->beginTransaction();
+    try {
+        $pdo->prepare("INSERT IGNORE INTO cheque_serial_counters (cheque_type, entry_date, next_serial) VALUES (?, ?, 1)")
+            ->execute([$cheque_type, $entry_date]);
+        $pdo->prepare("UPDATE cheque_serial_counters
+                          SET next_serial = LAST_INSERT_ID(GREATEST(next_serial,
+                                COALESCE((SELECT MAX(serial_no) FROM cheque_records
+                                           WHERE cheque_type = ? AND entry_date = ?), 0) + 1) + 1)
+                        WHERE cheque_type = ? AND entry_date = ?")
+            ->execute([$cheque_type, $entry_date, $cheque_type, $entry_date]);
+        $next_serial = (int)$pdo->query("SELECT LAST_INSERT_ID()")->fetchColumn() - 1;
+        if ($next_serial < 1) throw new RuntimeException('Serial allocation failed.');
+
+        $sheet_no = (int)ceil($next_serial / $ENTRIES_PER_SHEET);
+        if ($sheet_no < 1) $sheet_no = 1;
+
+        $pdo->prepare("INSERT INTO cheque_records (cheque_type,serial_no,cheque_no,cheque_date,bank_name,amount,remarks,sheet_no,entry_date,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)")
+            ->execute([$cheque_type,$next_serial,$cheque_no,$cheque_date,$bank_name,$amount,$remarks,$sheet_no,$entry_date,$tokenData['user_id']]);
+        $newChequeId = (int)$pdo->lastInsertId();
+        $pdo->commit();
+    } catch (\Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        error_log('[CTMS cheques] entry could not be saved: ' . get_class($e) . ': ' . $e->getMessage());
+        http_response_code(500);
+        echo json_encode(["error" => "The cheque entry could not be saved. Please retry."]);
+        exit();
+    }
 
     try {
         $pdo->prepare("INSERT INTO audit_log(user_id,action,module,record_id,new_value,ip_address) VALUES(?,?,?,?,?,?)")

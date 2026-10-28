@@ -445,16 +445,21 @@ if ($method === 'POST') {
 
         $pdo->commit();
 
-        // Audit log
-        $pdo->prepare("
-            INSERT INTO audit_log (user_id, action, module, record_id, new_value, ip_address)
-            VALUES (?, 'TEST_RESULTS_SUBMITTED', 'results', ?, ?, ?)
-        ")->execute([
-            $tokenData['user_id'],
-            $lot_id,
-            json_encode(['lab_stream' => $lab_stream, 'samples_saved' => $savedCount, 'changes' => $auditSamples]),
-            $_SERVER['REMOTE_ADDR'] ?? ''
-        ]);
+        // Audit log — written after the commit. If it fails the results are
+        // already saved, so the failure must not turn the response into a 500.
+        try {
+            $pdo->prepare("
+                INSERT INTO audit_log (user_id, action, module, record_id, new_value, ip_address)
+                VALUES (?, 'TEST_RESULTS_SUBMITTED', 'results', ?, ?, ?)
+            ")->execute([
+                $tokenData['user_id'],
+                $lot_id,
+                json_encode(['lab_stream' => $lab_stream, 'samples_saved' => $savedCount, 'changes' => $auditSamples]),
+                $_SERVER['REMOTE_ADDR'] ?? ''
+            ]);
+        } catch (\Throwable $auditError) {
+            error_log('[CTMS results] audit log write failed: ' . $auditError->getMessage());
+        }
 
         echo json_encode([
             "success"      => true,
@@ -464,10 +469,16 @@ if ($method === 'POST') {
             "errors"       => $errors,
         ]);
 
-    } catch (\PDOException $e) {
-        $pdo->rollBack();
+    } catch (\Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        error_log('[CTMS results] submission failed: ' . get_class($e) . ': ' . $e->getMessage());
         http_response_code(500);
-        echo json_encode(["error" => "Failed to save results", "details" => ctms_db_error($e)]);
+        echo json_encode([
+            "error"   => "Failed to save results",
+            "details" => $e instanceof \PDOException
+                ? ctms_db_error($e)
+                : "Unexpected server error — no results were saved. Please retry.",
+        ]);
     }
     exit();
 }

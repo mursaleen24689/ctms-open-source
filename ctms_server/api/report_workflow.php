@@ -99,7 +99,8 @@ try {
             }
         }
         $pdo->beginTransaction();
-        $pdo->exec('INSERT INTO report_workflow_settings (id, require_technical_review) VALUES (1, 1) ON DUPLICATE KEY UPDATE require_technical_review = VALUES(require_technical_review)');
+        $pdo->prepare('INSERT INTO report_workflow_settings (id, require_technical_review) VALUES (1, ?) ON DUPLICATE KEY UPDATE require_technical_review = VALUES(require_technical_review)')
+            ->execute([$required]);
         $pdo->exec('DELETE FROM report_workflow_reviewers');
         $insert = $pdo->prepare('INSERT INTO report_workflow_reviewers (user_id) VALUES (?)');
         foreach ($reviewerIds as $rid) $insert->execute([$rid]);
@@ -108,7 +109,16 @@ try {
             $pdo->prepare("INSERT INTO audit_log (user_id, action, module, record_id, new_value, ip_address) VALUES (?, 'REPORT_WORKFLOW_CONFIGURED', 'reports', 1, ?, ?)")
                 ->execute([$userId, json_encode(['require_technical_review' => (bool)$required, 'reviewer_ids' => $reviewerIds]), $_SERVER['REMOTE_ADDR'] ?? '']);
         } catch (Throwable $ignored) { /* the workflow configuration is already saved */ }
-        echo json_encode(['success' => true, 'message' => 'Report workflow settings saved.']);
+        echo json_encode([
+            'success'  => true,
+            'message'  => $required
+                ? 'Report workflow settings saved. Technical review is required.'
+                : 'Report workflow settings saved. Technical review is turned off.',
+            'settings' => [
+                'require_technical_review' => (bool)$required,
+                'reviewer_ids'             => $reviewerIds,
+            ],
+        ]);
         exit;
     }
 
