@@ -3,6 +3,15 @@
 All notable changes to this repository are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- Paste-from-Excel handlers in the results, cheque and sample grids now remove
+  every carriage return from a pasted cell instead of only the first one,
+  clearing code-scanning alerts 1 to 4 (`js/incomplete-sanitization`).
+  (2026-10-28, [@mursaleen24689](https://github.com/mursaleen24689))
+
 ## [0.2.0] - 2026-10-28
 
 This release brings the public copy up to date with the security and

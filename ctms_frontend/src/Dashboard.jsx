@@ -490,7 +490,7 @@ function Dashboard({ user, userId = 0, role = 'admin', labStream = '', consultan
 
     let rows = e.clipboardData.getData('text').split('\n').map(r => r.split('\t'));
     // Remove trailing empty row that some clipboard sources add
-    if (rows.length > 1 && rows[rows.length - 1].every(c => c.replace('\r','') === '')) rows.pop();
+    if (rows.length > 1 && rows[rows.length - 1].every(c => c.replace(/\r/g,'') === '')) rows.pop();
 
     // If user selected a range taller than the copied data (e.g. copied 1 row
     // but selected 20 rows to fill), repeat the copied rows to fill the whole
@@ -517,7 +517,7 @@ function Dashboard({ user, userId = 0, role = 'admin', labStream = '', consultan
     if (grew) setSrNumbers(sr);
     rows.forEach((row, i) => row.forEach((cell, j) => {
       if (anchor.row+i < g.length && anchor.col+j < columns.length) {
-        let v = cell.replace('\r','');
+        let v = cell.replace(/\r/g,'');
         if (numericColumns.includes(columns[anchor.col+j])) v = v.replace(/[^0-9]/g,'');
         g[anchor.row+i][anchor.col+j] = v;
       }
@@ -681,7 +681,7 @@ function Dashboard({ user, userId = 0, role = 'admin', labStream = '', consultan
       const sampleId = samples[anchor.row + i]?.id;
       const col = labCols[anchor.col + j];
       if (sampleId && col) {
-        handleTestValueChange(sampleId, col, cell.replace('\r', ''));
+        handleTestValueChange(sampleId, col, cell.replace(/\r/g, ''));
       }
     }));
   };
@@ -2450,7 +2450,7 @@ function Dashboard({ user, userId = 0, role = 'admin', labStream = '', consultan
       while (startRow + rows.length > g.length) g.push(Array(chequeGridCols().length).fill(''));
       rows.forEach((row,i) => row.forEach((cell,j) => {
         if (startRow+i < g.length && startCol+j < chequeGridCols().length)
-          g[startRow+i][startCol+j] = cell.replace('\r','');
+          g[startRow+i][startCol+j] = cell.replace(/\r/g,'');
       }));
       return g;
     });
